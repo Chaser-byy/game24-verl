@@ -121,7 +121,7 @@ The final objective is highest 24-point correctness. This project does not maint
 
 ## Data Preparation
 
-`scripts/prepare_data.py` loads `nlile/24-game` and `test-time-compute/game-of-24`, adapts likely field names, deduplicates by `tuple(sorted(numbers))`, reserves the ToT fixed index range `[900, 1000)`, removes those IDs from training candidates, splits train/validation with a fixed seed, builds an ordinary test split from non-overlapping ToT records, and writes:
+`scripts/prepare_data.py` loads `nlile/24-game` and `test-time-compute/game-of-24`, adapts likely field names, deduplicates by `tuple(sorted(numbers))`, reserves the ToT fixed index range `[900, 1000)`, first reserves an ordinary non-overlapping test split from the remaining ToT records, then splits train/validation from the remaining `nlile/24-game` solvable IDs with a fixed seed. If the upstream datasets do not include unsolvable puzzles, the script fills `unsolvable.parquet` by enumerating classic 1-13 four-card combinations and checking them with the exact solver. It writes:
 
 ```text
 train.parquet
@@ -133,6 +133,13 @@ dataset_stats.json
 ```
 
 No reference answer is added to the RL prompt.
+
+The defaults are sized for the classic 1362 solvable 24-point combinations:
+
+```text
+--val-size 128
+--test-size 256
+```
 
 ## SFT Data
 

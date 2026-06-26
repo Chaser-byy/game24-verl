@@ -9,7 +9,7 @@ import random
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from itertools import combinations
+from itertools import combinations, combinations_with_replacement
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +17,14 @@ import pandas as pd
 from datasets import Dataset, DatasetDict, load_dataset
 
 from game24.prompt import build_chat_prompt
+from game24.solver import solve_game24
 
 NLILE_DATASET = "nlile/24-game"
 TOT_DATASET = "test-time-compute/game-of-24"
 TOT_HARD100_SLICE = slice(900, 1000)
+CLASSIC_CARD_VALUES = range(1, 14)
+DEFAULT_VAL_SIZE = "128"
+DEFAULT_TEST_SIZE = "256"
 
 NUMBER_FIELDS = (
     "numbers",
@@ -209,6 +213,29 @@ def _dedupe_by_problem(problems: Iterable[Problem]) -> list[Problem]:
     return list(seen.values())
 
 
+def _generate_classic_unsolvable(
+    known_problem_ids: set[tuple[int, int, int, int]],
+    *,
+    target: int = 24,
+) -> list[Problem]:
+    generated: list[Problem] = []
+    for index, numbers in enumerate(combinations_with_replacement(CLASSIC_CARD_VALUES, 4)):
+        if numbers in known_problem_ids:
+            continue
+        if solve_game24(numbers, target=target, max_solutions=1):
+            continue
+        generated.append(
+            Problem(
+                numbers=numbers,
+                target=target,
+                solvable=False,
+                source="generated:classic_1_13_unsolvable",
+                source_index=index,
+            )
+        )
+    return generated
+
+
 def _resolve_size(value: str, total: int, name: str) -> int:
     if "." in value:
         fraction = float(value)
@@ -296,11 +323,31 @@ def prepare_data(args: argparse.Namespace) -> dict[str, Any]:
     unsolvable = _dedupe_by_problem(problem for problem in nlile_problems if not problem.solvable)
     tot_hard100 = _dedupe_by_problem(tot_hard100_raw)
     tot_hard100_ids = _ids(tot_hard100)
+    if not unsolvable:
+        unsolvable = _generate_classic_unsolvable(_ids(nlile_problems) | _ids(tot_problems))
+    unsolvable_ids = _ids(unsolvable)
 
     solvable_deduped = _dedupe_by_problem(solvable_nlile)
-    train_candidates = [problem for problem in solvable_deduped if problem.problem_id not in tot_hard100_ids]
-
+    tot_deduped = _dedupe_by_problem(tot_problems)
     rng = random.Random(args.seed)
+
+    ordinary_test_pool = [
+        problem
+        for problem in tot_deduped
+        if problem.problem_id not in tot_hard100_ids and problem.problem_id not in unsolvable_ids
+    ]
+    rng.shuffle(ordinary_test_pool)
+    test_size = min(_resolve_size(args.test_size, len(ordinary_test_pool), "--test-size"), len(ordinary_test_pool))
+    test_problems = ordinary_test_pool[:test_size]
+    test_ids = _ids(test_problems)
+
+    train_candidates = [
+        problem
+        for problem in solvable_deduped
+        if problem.problem_id not in tot_hard100_ids
+        and problem.problem_id not in test_ids
+        and problem.problem_id not in unsolvable_ids
+    ]
     rng.shuffle(train_candidates)
 
     val_size = min(_resolve_size(args.val_size, len(train_candidates), "--val-size"), len(train_candidates))
@@ -308,17 +355,6 @@ def prepare_data(args: argparse.Namespace) -> dict[str, Any]:
     train_problems = train_candidates[val_size:]
     if args.train_limit is not None:
         train_problems = train_problems[: args.train_limit]
-
-    train_val_ids = _ids(train_problems) | _ids(val_problems)
-    tot_deduped = _dedupe_by_problem(tot_problems)
-    ordinary_test_candidates = [
-        problem
-        for problem in tot_deduped
-        if problem.problem_id not in train_val_ids and problem.problem_id not in tot_hard100_ids
-    ]
-    rng.shuffle(ordinary_test_candidates)
-    test_size = min(_resolve_size(args.test_size, len(ordinary_test_candidates), "--test-size"), len(ordinary_test_candidates))
-    test_problems = ordinary_test_candidates[:test_size]
 
     required = {
         "train": train_problems,
@@ -362,9 +398,10 @@ def prepare_data(args: argparse.Namespace) -> dict[str, Any]:
             },
         },
         "excluded": {
-            "train_candidates_removed_by_tot_hard100": len(solvable_deduped) - len(train_candidates),
-            "ordinary_test_candidates_removed_by_train_val_or_tot_hard100": len(tot_deduped)
-            - len(ordinary_test_candidates),
+            "train_candidates_removed_by_test_or_tot_hard100_or_unsolvable": len(solvable_deduped)
+            - len(train_candidates),
+            "ordinary_test_pool_removed_by_tot_hard100_or_unsolvable": len(tot_deduped)
+            - len(ordinary_test_pool),
         },
         "intersections": intersections,
         "outputs": {
@@ -390,8 +427,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare Game of 24 parquet data for verl.")
     parser.add_argument("--output-dir", default="data/game24")
     parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--val-size", default="512")
-    parser.add_argument("--test-size", default="1000")
+    parser.add_argument("--val-size", default=DEFAULT_VAL_SIZE)
+    parser.add_argument("--test-size", default=DEFAULT_TEST_SIZE)
     parser.add_argument("--train-limit", type=int, default=None)
     return parser.parse_args()
 
