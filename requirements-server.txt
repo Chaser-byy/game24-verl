@@ -1,6 +1,7 @@
-# Project-level Python dependencies for data preparation and evaluation.
+# Project-level Python dependencies for data preparation, SFT data building, and evaluation.
 # Install verl==0.7.1 and its GPU stack using the official verl instructions.
 # Do not treat this file as a CUDA, PyTorch, Ray, or vLLM lockfile.
+# The exact solver and trajectory builder use only the Python standard library.
 
 datasets
 pandas

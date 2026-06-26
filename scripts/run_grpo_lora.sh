@@ -3,32 +3,45 @@ set -euo pipefail
 
 # Target verl version: v0.7.1
 # This script is not intended for verl v0.8.0 or the main branch.
+# Recommended route: run full-parameter SFT first, export a Hugging Face model,
+# then set MODEL_PATH to that exported SFT model directory before launching GRPO.
 
-MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-1.5B-Instruct}"
-TRAIN_FILE="${TRAIN_FILE:-data/game24/train.parquet}"
-VAL_FILE="${VAL_FILE:-data/game24/val.parquet}"
-REWARD_FILE="${REWARD_FILE:-game24/reward.py}"
-OUTPUT_DIR="${OUTPUT_DIR:-outputs/game24-grpo-lora}"
+MODEL_PATH="${MODEL_PATH:-${GRPO_MODEL_PATH:-}}"
+TRAIN_FILE="${TRAIN_FILE:-${GRPO_TRAIN_FILE:-data/game24/train.parquet}}"
+VAL_FILE="${VAL_FILE:-${GRPO_VAL_FILE:-data/game24/val.parquet}}"
+REWARD_FILE="${REWARD_FILE:-${GRPO_REWARD_FILE:-game24/reward.py}}"
+OUTPUT_DIR="${OUTPUT_DIR:-${GRPO_OUTPUT_DIR:-outputs/game24-sft-grpo-lora}}"
 PROJECT_NAME="${PROJECT_NAME:-game24-verl}"
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen25-1p5b-grpo-lora}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-${GRPO_EXPERIMENT_NAME:-qwen25-1p5b-sft-grpo-lora}}"
 
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-32}"
-ROLLOUT_N="${ROLLOUT_N:-8}"
-MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-192}"
-MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-256}"
-LORA_RANK="${LORA_RANK:-64}"
-LORA_ALPHA="${LORA_ALPHA:-64}"
-LEARNING_RATE="${LEARNING_RATE:-2e-6}"
-TOTAL_EPOCHS="${TOTAL_EPOCHS:-8}"
-TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-}"
-SAVE_FREQ="${SAVE_FREQ:-50}"
-TEST_FREQ="${TEST_FREQ:-25}"
-GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.45}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-${GRPO_TRAIN_BATCH_SIZE:-16}}"
+ROLLOUT_N="${ROLLOUT_N:-${GRPO_ROLLOUT_N:-16}}"
+MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-${GRPO_MAX_PROMPT_LENGTH:-192}}"
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-${GRPO_MAX_RESPONSE_LENGTH:-256}}"
+LORA_RANK="${LORA_RANK:-${GRPO_LORA_RANK:-64}}"
+LORA_ALPHA="${LORA_ALPHA:-${GRPO_LORA_ALPHA:-64}}"
+LEARNING_RATE="${LEARNING_RATE:-${GRPO_LEARNING_RATE:-1e-6}}"
+TOTAL_EPOCHS="${TOTAL_EPOCHS:-${GRPO_TOTAL_EPOCHS:-8}}"
+TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-${GRPO_TOTAL_TRAINING_STEPS:-400}}"
+SAVE_FREQ="${SAVE_FREQ:-${GRPO_SAVE_FREQ:-50}}"
+TEST_FREQ="${TEST_FREQ:-${GRPO_TEST_FREQ:-25}}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-${GRPO_GPU_MEMORY_UTILIZATION:-0.45}}"
 N_GPUS="${N_GPUS:-1}"
 DTYPE="${DTYPE:-bfloat16}"
+TEMPERATURE="${TEMPERATURE:-${GRPO_TEMPERATURE:-1.0}}"
+TOP_P="${TOP_P:-${GRPO_TOP_P:-0.95}}"
+
+if [[ -z "${MODEL_PATH}" ]]; then
+  cat >&2 <<ERROR
+MODEL_PATH must point to the exported Hugging Face SFT model directory.
+Run scripts/run_sft.sh first, export/merge the SFT checkpoint if needed, then retry:
+  MODEL_PATH=/path/to/exported-sft-hf-model bash scripts/run_grpo_lora.sh
+ERROR
+  exit 2
+fi
 
 cat <<CONFIG
-Game24 verl GRPO LoRA configuration
+Game24 verl GRPO LoRA configuration after SFT warm start
   Target verl version: v0.7.1
   MODEL_PATH=${MODEL_PATH}
   TRAIN_FILE=${TRAIN_FILE}
@@ -51,6 +64,8 @@ Game24 verl GRPO LoRA configuration
   GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION}
   N_GPUS=${N_GPUS}
   DTYPE=${DTYPE}
+  TEMPERATURE=${TEMPERATURE}
+  TOP_P=${TOP_P}
 CONFIG
 
 EXTRA_ARGS=()
@@ -82,6 +97,8 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.name=vllm \
   actor_rollout_ref.rollout.n="${ROLLOUT_N}" \
   actor_rollout_ref.rollout.dtype="${DTYPE}" \
+  actor_rollout_ref.rollout.temperature="${TEMPERATURE}" \
+  actor_rollout_ref.rollout.top_p="${TOP_P}" \
   actor_rollout_ref.rollout.tensor_model_parallel_size="${N_GPUS}" \
   actor_rollout_ref.rollout.gpu_memory_utilization="${GPU_MEMORY_UTILIZATION}" \
   actor_rollout_ref.rollout.enforce_eager=False \

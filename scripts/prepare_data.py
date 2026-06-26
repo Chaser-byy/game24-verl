@@ -33,8 +33,19 @@ NUMBER_FIELDS = (
     "question",
     "problem",
     "puzzle",
+    "puzzles",
+    "Puzzles",
 )
-SOLVABLE_FIELDS = ("solvable", "is_solvable", "can_solve", "has_solution", "label")
+SOLVABLE_FIELDS = (
+    "solvable",
+    "is_solvable",
+    "can_solve",
+    "has_solution",
+    "label",
+    "solved",
+    "solved_rate",
+    "Solved rate",
+)
 TARGET_FIELDS = ("target", "answer", "result")
 
 
@@ -57,6 +68,30 @@ class Problem:
 
 def _available_fields(row: Mapping[str, Any]) -> str:
     return ", ".join(sorted(row.keys()))
+
+
+def _normalize_field_name(field: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", field.lower())
+
+
+def _candidate_values(row: Mapping[str, Any], candidates: Sequence[str]) -> list[tuple[str, Any]]:
+    values: list[tuple[str, Any]] = []
+    seen: set[str] = set()
+
+    for candidate in candidates:
+        if candidate in row and candidate not in seen:
+            values.append((candidate, row[candidate]))
+            seen.add(candidate)
+
+    normalized_candidates = {_normalize_field_name(candidate) for candidate in candidates}
+    for field, value in row.items():
+        if field in seen:
+            continue
+        if _normalize_field_name(field) in normalized_candidates:
+            values.append((field, value))
+            seen.add(field)
+
+    return values
 
 
 def _numbers_from_value(value: Any) -> tuple[int, int, int, int] | None:
@@ -85,12 +120,18 @@ def _numbers_from_value(value: Any) -> tuple[int, int, int, int] | None:
 
 
 def extract_numbers(row: Mapping[str, Any]) -> tuple[int, int, int, int]:
-    for field in NUMBER_FIELDS:
-        if field in row:
-            numbers = _numbers_from_value(row[field])
-            if numbers is not None:
-                return numbers
-    raise ValueError(f"could not extract four numbers; available fields: {_available_fields(row)}")
+    attempted_fields: list[str] = []
+    for field, value in _candidate_values(row, NUMBER_FIELDS):
+        attempted_fields.append(field)
+        numbers = _numbers_from_value(value)
+        if numbers is not None:
+            return numbers
+
+    attempted = ", ".join(attempted_fields) if attempted_fields else "none"
+    raise ValueError(
+        "could not extract four numbers; "
+        f"candidate fields tried: {attempted}; available fields: {_available_fields(row)}"
+    )
 
 
 def _bool_from_value(value: Any) -> bool | None:
@@ -108,26 +149,23 @@ def _bool_from_value(value: Any) -> bool | None:
 
 
 def extract_solvable(row: Mapping[str, Any], *, default: bool | None = None) -> bool:
-    for field in SOLVABLE_FIELDS:
-        if field in row:
-            solvable = _bool_from_value(row[field])
-            if solvable is not None:
-                return solvable
+    for _, value in _candidate_values(row, SOLVABLE_FIELDS):
+        solvable = _bool_from_value(value)
+        if solvable is not None:
+            return solvable
     if default is not None:
         return default
     raise ValueError(f"could not extract solvable flag; available fields: {_available_fields(row)}")
 
 
 def extract_target(row: Mapping[str, Any], *, default: int = 24) -> int:
-    for field in TARGET_FIELDS:
-        if field in row:
-            value = row[field]
-            if isinstance(value, bool):
-                continue
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                continue
+    for _, value in _candidate_values(row, TARGET_FIELDS):
+        if isinstance(value, bool):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
     return default
 
 
