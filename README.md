@@ -167,6 +167,8 @@ solved SFT train problem IDs * up to 8 solutions * up to 2 prompt/permutation va
 
 For the classic 24-point problem scale, this is intended to land around 10k-30k high-quality samples, depending on how many unique train IDs are actually solvable and how many diverse exact solutions the solver finds.
 
+Trajectory text keeps remaining-value lists compact, such as `5/6`, but wraps non-integer fractions when they are operation operands, such as `20 / (5/6)` or `(6/5) * 20`. Before writing each SFT row, the generator checks every structured solver step with `Fraction` arithmetic and skips any inconsistent candidate while counting it in `sft_stats.json`.
+
 ## SFT Configuration
 
 `scripts/run_sft.sh` defaults to full-parameter SFT, not LoRA:

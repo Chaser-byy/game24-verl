@@ -186,6 +186,27 @@ def _select_diverse_solutions(solutions: Sequence[Solution], limit: int) -> list
     return selected
 
 
+def _operation_matches_step(solution: Solution) -> bool:
+    for step in solution.steps:
+        if step.operator == "+":
+            expected = step.left_value + step.right_value
+        elif step.operator == "-":
+            expected = step.left_value - step.right_value
+        elif step.operator == "*":
+            expected = step.left_value * step.right_value
+        elif step.operator == "/":
+            if step.right_value == 0:
+                return False
+            expected = step.left_value / step.right_value
+        else:
+            return False
+
+        if expected != step.result:
+            return False
+
+    return True
+
+
 def _make_records_for_problem(
     problem: Problem,
     *,
@@ -206,7 +227,12 @@ def _make_records_for_problem(
     selected = _select_diverse_solutions(solutions, solutions_per_problem)
 
     if not selected:
-        return [], {"solutions_found": 0, "solutions_selected": 0}
+        return [], {
+            "solutions_found": len(solutions),
+            "solutions_selected": 0,
+            "skipped_inconsistent_records": 0,
+            "records": 0,
+        }
 
     permutations_for_problem = _unique_permutations(
         problem.numbers,
@@ -218,9 +244,14 @@ def _make_records_for_problem(
 
     records: list[dict[str, Any]] = []
     seen_records: set[tuple[str, str, str]] = set()
+    skipped_inconsistent_records = 0
 
     for solution_index, solution in enumerate(selected):
         for variant_index in range(variants_per_solution):
+            if not _operation_matches_step(solution):
+                skipped_inconsistent_records += 1
+                continue
+
             permutation_index = (solution_index + variant_index) % len(permutations_for_problem)
             template_index = (solution_index + variant_index) % template_count
             numbers = permutations_for_problem[permutation_index]
@@ -255,6 +286,7 @@ def _make_records_for_problem(
     return records, {
         "solutions_found": len(solutions),
         "solutions_selected": len(selected),
+        "skipped_inconsistent_records": skipped_inconsistent_records,
         "records": len(records),
     }
 
@@ -326,6 +358,7 @@ def build_sft_data(args: argparse.Namespace) -> dict[str, Any]:
         unsolved_problems = 0
         solutions_found = 0
         solutions_selected = 0
+        skipped_inconsistent_records = 0
 
         for problem in problems:
             records, problem_stats = _make_records_for_problem(
@@ -344,6 +377,7 @@ def build_sft_data(args: argparse.Namespace) -> dict[str, Any]:
 
             solutions_found += problem_stats["solutions_found"]
             solutions_selected += problem_stats["solutions_selected"]
+            skipped_inconsistent_records += problem_stats["skipped_inconsistent_records"]
             all_records[split].extend(records)
 
         per_split_stats[split] = {
@@ -352,6 +386,7 @@ def build_sft_data(args: argparse.Namespace) -> dict[str, Any]:
             "unsolved_problem_ids": unsolved_problems,
             "solutions_found": solutions_found,
             "solutions_selected": solutions_selected,
+            "skipped_inconsistent_records": skipped_inconsistent_records,
             "records": len(all_records[split]),
         }
 
@@ -359,6 +394,9 @@ def build_sft_data(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("no SFT training records were generated")
     if sft_val_ids and not all_records["sft_val"]:
         raise ValueError("SFT validation split was requested but no validation records were generated")
+
+    random.Random(args.seed).shuffle(all_records["sft_train"])
+    random.Random(args.seed).shuffle(all_records["sft_val"])
 
     pd.DataFrame(all_records["sft_train"]).to_parquet(output_dir / "sft_train.parquet", index=False)
     pd.DataFrame(all_records["sft_val"]).to_parquet(output_dir / "sft_val.parquet", index=False)
@@ -383,6 +421,7 @@ def build_sft_data(args: argparse.Namespace) -> dict[str, Any]:
             "prompt_templates": args.prompt_templates,
             "sft_val_ratio": args.sft_val_ratio,
             "max_search_nodes": args.max_search_nodes,
+            "rows_shuffled": True,
         },
         "splits": per_split_stats,
         "expected_scale_note": (

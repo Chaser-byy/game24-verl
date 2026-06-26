@@ -14,13 +14,20 @@ def format_fraction(value: Fraction) -> str:
     return f"{value.numerator}/{value.denominator}"
 
 
+def format_operand(value: Fraction) -> str:
+    text = format_fraction(value)
+    if value.denominator == 1:
+        return text
+    return f"({text})"
+
+
 def _format_remaining(values: tuple[Fraction, ...]) -> str:
     return ", ".join(format_fraction(value) for value in values)
 
 
 def step_to_sentence(step: OperationStep) -> str:
-    left = format_fraction(step.left_value)
-    right = format_fraction(step.right_value)
+    left = format_operand(step.left_value)
+    right = format_operand(step.right_value)
     result = format_fraction(step.result)
     remaining = _format_remaining(step.remaining)
     return (
