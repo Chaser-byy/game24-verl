@@ -1,0 +1,7 @@
+# Project-level Python dependencies for data preparation and evaluation.
+# Install verl==0.7.1 and its GPU stack using the official verl instructions.
+# Do not treat this file as a CUDA, PyTorch, Ray, or vLLM lockfile.
+
+datasets
+pandas
+pyarrow
