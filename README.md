@@ -186,7 +186,13 @@ Trajectory text keeps remaining-value lists compact, such as `5/6`, but wraps no
 - `SFT_ATTENTION_IMPLEMENTATION=sdpa`
 - `SFT_USE_REMOVE_PADDING=False`
 
-The script sets `data.messages_key=messages`, FSDP, BF16, gradient checkpointing, `model.override_config.attn_implementation=sdpa`, and `checkpoint.save_contents=["model","optimizer","extra","hf_model"]`. The default `sdpa` attention backend and `SFT_USE_REMOVE_PADDING=False` avoid requiring `flash_attn` for smoke tests and default server runs. Set `SFT_ATTENTION_IMPLEMENTATION=flash_attention_2 SFT_USE_REMOVE_PADDING=True` only on environments where FlashAttention2 is installed. The actual checkpoint directory layout must still be validated on the server.
+The script sets `data.messages_key=messages`, FSDP, BF16, gradient checkpointing, and `checkpoint.save_contents=["model","optimizer","extra","hf_model"]`. It also prints the exact Hydra overrides array before launching `torchrun`; the printed `data.train_files`, `data.val_files`, `++model.override_config.attn_implementation`, and `model.use_remove_padding` lines are the values actually passed to Hydra.
+
+`SFT_ATTENTION_IMPLEMENTATION=sdpa` emits `++model.override_config.attn_implementation=sdpa`. The per-key `++` is intentional: in verl v0.7.1, `model.override_config` is an existing structured Hydra dict, but `attn_implementation` is a dynamic Hugging Face config key that may not already exist inside it. Plain `model.override_config.attn_implementation=sdpa` fails Hydra struct validation when the nested key is absent. The narrow `++` adds or updates only that one key and does not disable structure checks elsewhere. Set `SFT_ATTENTION_IMPLEMENTATION=` to omit the attention override entirely.
+
+The default `sdpa` attention backend and `SFT_USE_REMOVE_PADDING=False` avoid requiring `flash_attn` for smoke tests and default server runs. `data.use_dynamic_bsz=True` and `data.pad_mode=no_padding` remain part of the SFT data pipeline configuration; they are not vLLM settings. Set `SFT_ATTENTION_IMPLEMENTATION=flash_attention_2 SFT_USE_REMOVE_PADDING=True` only on environments where FlashAttention2 has been installed and separately verified. The script never installs FlashAttention2 automatically. A `torch_dtype` deprecation warning from Transformers is not the root cause of the FlashAttention/Hydra failures described here.
+
+For smoke runs, set `SFT_TRAIN_FILE` and `SFT_VAL_FILE` to the small parquet paths before launching. The script uses those same variables in both the configuration printout and the Hydra overrides, so verify the log shows the smoke paths and that verl reports smoke-scale `dataset len:` values before trusting a short run.
 
 ## GRPO After SFT
 
@@ -216,6 +222,8 @@ Default GRPO-LoRA settings:
 - `N_GPUS=1`
 
 The GRPO script still uses vLLM rollout, KL loss, checkpoint saving, console and WandB logging, and the custom reward function `game24/reward.py:compute_score`.
+
+This script currently does not add an attention backend override under `actor_rollout_ref.model.override_config`, so it does not have the same Hydra struct failure mode as the SFT script. If a future GRPO run needs a Transformers actor/ref attention override, add it with the same narrow per-key Hydra add/update semantics and verify from the installed verl v0.7.1 source that the key reaches the FSDP actor/ref model path without being applied to vLLM rollout internals.
 
 ## Evaluation
 
@@ -251,14 +259,17 @@ This repository was authored locally only. No tests, data downloads, SFT data ge
 Verify these items on the GPU server:
 
 - Exact `verl==0.7.1` install and both trainer entries.
-- SFT Hydra keys: `data.messages_key`, FSDP `engine.*`, BF16 dtype, checkpoint `save_contents`, and `model.use_remove_padding`.
+- SFT Hydra keys: `data.messages_key`, FSDP `engine.*`, BF16 dtype, checkpoint `save_contents`, `++model.override_config.attn_implementation`, and `model.use_remove_padding`.
+- SFT smoke logs: printed `SFT_TRAIN_FILE`/`SFT_VAL_FILE`, printed Hydra `data.train_files`/`data.val_files`, and verl `dataset len:` values must all indicate the intended small files.
+- SFT attention logs: printed `ATTENTION_IMPLEMENTATION` and `USE_REMOVE_PADDING` must match the Hydra overrides, Hydra must not fail with a struct error, and model loading must not request missing FlashAttention2 when using `sdpa`.
 - Whether `hf_model` checkpoint content produces a directly loadable SFT directory in v0.7.1.
 - If needed, the official `python -m verl.model_merger merge --backend fsdp` path and expected actor checkpoint directory.
-- PPO/GRPO Hydra keys for LoRA, vLLM rollout, rollout temperature/top-p, custom reward path/name, logger, checkpoint, and KL loss.
+- PPO/GRPO Hydra keys for LoRA, vLLM rollout, rollout temperature/top-p, custom reward path/name, logger, checkpoint, KL loss, and whether a separate Transformers actor/ref attention override is needed.
 - Actual field names and sizes in `nlile/24-game` and `test-time-compute/game-of-24`.
 - Dataset leakage checks printed by `prepare_data.py` and `build_sft_data.py`.
 - WandB environment and model access credentials.
 - Single 80GB GPU memory fit for one-epoch SFT and rollout `n=16` GRPO.
+- For tiny SFT smoke runs, keep the final printed Hydra overrides with the log, run only a few training steps, and inspect loss, peak memory, and checkpoint output before starting a full run.
 
 Suggested first server command:
 

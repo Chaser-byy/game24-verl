@@ -24,8 +24,57 @@ TEST_FREQ="${TEST_FREQ:-${SFT_TEST_FREQ:--1}}"
 DTYPE="${DTYPE:-bfloat16}"
 LOGGER="${LOGGER:-[\"console\",\"wandb\"]}"
 CHECKPOINT_SAVE_CONTENTS="${CHECKPOINT_SAVE_CONTENTS:-${SFT_CHECKPOINT_SAVE_CONTENTS:-[\"model\",\"optimizer\",\"extra\",\"hf_model\"]}}"
-ATTENTION_IMPLEMENTATION="${ATTENTION_IMPLEMENTATION:-${SFT_ATTENTION_IMPLEMENTATION:-sdpa}}"
-USE_REMOVE_PADDING="${USE_REMOVE_PADDING:-${SFT_USE_REMOVE_PADDING:-False}}"
+ATTENTION_IMPLEMENTATION="${ATTENTION_IMPLEMENTATION-${SFT_ATTENTION_IMPLEMENTATION-sdpa}}"
+USE_REMOVE_PADDING="${USE_REMOVE_PADDING-${SFT_USE_REMOVE_PADDING-False}}"
+
+HYDRA_ARGS=(
+  "data.train_files=${SFT_TRAIN_FILE}"
+  "data.val_files=${SFT_VAL_FILE}"
+  "data.messages_key=messages"
+  "data.train_batch_size=${TRAIN_BATCH_SIZE}"
+  "data.micro_batch_size_per_gpu=${MICRO_BATCH_SIZE}"
+  "data.max_length=${MAX_LENGTH}"
+  "data.max_token_len_per_gpu=${MAX_TOKEN_LEN_PER_GPU}"
+  "data.use_dynamic_bsz=True"
+  "data.pad_mode=no_padding"
+  "data.truncation=error"
+  "model.path=${MODEL_PATH}"
+  "model.trust_remote_code=True"
+  "model.enable_gradient_checkpointing=True"
+  "model.lora_rank=0"
+  "engine.strategy=fsdp"
+  "engine.dtype=${DTYPE}"
+  "engine.param_offload=False"
+  "engine.optimizer_offload=False"
+  "optim.lr=${LEARNING_RATE}"
+  "checkpoint.save_contents=${CHECKPOINT_SAVE_CONTENTS}"
+  "checkpoint.load_contents=${CHECKPOINT_SAVE_CONTENTS}"
+  "trainer.project_name=${PROJECT_NAME}"
+  "trainer.experiment_name=${EXPERIMENT_NAME}"
+  "trainer.default_local_dir=${OUTPUT_DIR}"
+  "trainer.logger=${LOGGER}"
+  "trainer.n_gpus_per_node=${N_GPUS}"
+  "trainer.nnodes=1"
+  "trainer.total_epochs=${TOTAL_EPOCHS}"
+  "trainer.save_freq=${SAVE_FREQ}"
+  "trainer.test_freq=${TEST_FREQ}"
+  "trainer.resume_mode=disable"
+)
+
+# override_config is an existing structured Hydra dict, but attn_implementation
+# is a dynamic Hugging Face config key. Use per-key ++ so it works whether the
+# nested key is absent in verl v0.7.1 or predeclared by a future/user config.
+if [[ -n "${ATTENTION_IMPLEMENTATION}" ]]; then
+  HYDRA_ARGS+=("++model.override_config.attn_implementation=${ATTENTION_IMPLEMENTATION}")
+fi
+
+if [[ -n "${USE_REMOVE_PADDING}" ]]; then
+  HYDRA_ARGS+=("model.use_remove_padding=${USE_REMOVE_PADDING}")
+fi
+
+if [[ -n "${TOTAL_TRAINING_STEPS}" ]]; then
+  HYDRA_ARGS+=("trainer.total_training_steps=${TOTAL_TRAINING_STEPS}")
+fi
 
 cat <<CONFIG
 Game24 verl SFT configuration
@@ -47,50 +96,15 @@ Game24 verl SFT configuration
   SAVE_FREQ=${SAVE_FREQ}
   TEST_FREQ=${TEST_FREQ}
   DTYPE=${DTYPE}
-  ATTENTION_IMPLEMENTATION=${ATTENTION_IMPLEMENTATION}
-  USE_REMOVE_PADDING=${USE_REMOVE_PADDING}
+  ATTENTION_IMPLEMENTATION=${ATTENTION_IMPLEMENTATION:-<not set>}
+  USE_REMOVE_PADDING=${USE_REMOVE_PADDING:-<not set>}
   LOGGER=${LOGGER}
   CHECKPOINT_SAVE_CONTENTS=${CHECKPOINT_SAVE_CONTENTS}
 CONFIG
 
-EXTRA_ARGS=()
-if [[ -n "${TOTAL_TRAINING_STEPS}" ]]; then
-  EXTRA_ARGS+=("trainer.total_training_steps=${TOTAL_TRAINING_STEPS}")
-fi
+printf 'Hydra overrides:\n'
+printf '  %s\n' "${HYDRA_ARGS[@]}"
 
 torchrun --standalone --nnodes=1 --nproc_per_node="${N_GPUS}" \
   -m verl.trainer.sft_trainer \
-  data.train_files="${SFT_TRAIN_FILE}" \
-  data.val_files="${SFT_VAL_FILE}" \
-  data.messages_key=messages \
-  data.train_batch_size="${TRAIN_BATCH_SIZE}" \
-  data.micro_batch_size_per_gpu="${MICRO_BATCH_SIZE}" \
-  data.max_length="${MAX_LENGTH}" \
-  data.max_token_len_per_gpu="${MAX_TOKEN_LEN_PER_GPU}" \
-  data.use_dynamic_bsz=True \
-  data.pad_mode=no_padding \
-  data.truncation=error \
-  model.path="${MODEL_PATH}" \
-  model.trust_remote_code=True \
-  model.enable_gradient_checkpointing=True \
-  model.override_config.attn_implementation="${ATTENTION_IMPLEMENTATION}" \
-  model.use_remove_padding="${USE_REMOVE_PADDING}" \
-  model.lora_rank=0 \
-  engine.strategy=fsdp \
-  engine.dtype="${DTYPE}" \
-  engine.param_offload=False \
-  engine.optimizer_offload=False \
-  optim.lr="${LEARNING_RATE}" \
-  checkpoint.save_contents="${CHECKPOINT_SAVE_CONTENTS}" \
-  checkpoint.load_contents="${CHECKPOINT_SAVE_CONTENTS}" \
-  trainer.project_name="${PROJECT_NAME}" \
-  trainer.experiment_name="${EXPERIMENT_NAME}" \
-  trainer.default_local_dir="${OUTPUT_DIR}" \
-  trainer.logger="${LOGGER}" \
-  trainer.n_gpus_per_node="${N_GPUS}" \
-  trainer.nnodes=1 \
-  trainer.total_epochs="${TOTAL_EPOCHS}" \
-  trainer.save_freq="${SAVE_FREQ}" \
-  trainer.test_freq="${TEST_FREQ}" \
-  trainer.resume_mode=disable \
-  "${EXTRA_ARGS[@]}"
+  "${HYDRA_ARGS[@]}"
