@@ -104,7 +104,7 @@ python scripts/evaluate.py \
 6. Point GRPO to the exported SFT model:
 
 ```bash
-MODEL_PATH=outputs/game24-sft-hf bash scripts/run_grpo_lora.sh
+GRPO_MODEL_PATH=outputs/game24-sft-hf bash scripts/run_grpo_lora.sh
 ```
 
 7. Run GRPO-LoRA with rollout `n=16`.
@@ -199,29 +199,38 @@ For smoke runs, set `SFT_TRAIN_FILE` and `SFT_VAL_FILE` to the small parquet pat
 `scripts/run_grpo_lora.sh` requires:
 
 ```bash
-MODEL_PATH=/path/to/exported-sft-hf-model
+GRPO_MODEL_PATH=/path/to/exported-sft-hf-model
 ```
 
 It does not search checkpoints and does not default back to `Qwen/Qwen2.5-1.5B-Instruct`.
 
 Default GRPO-LoRA settings:
 
-- `TRAIN_BATCH_SIZE=16`
-- `ROLLOUT_N=16`
-- `MAX_PROMPT_LENGTH=192`
-- `MAX_RESPONSE_LENGTH=256`
-- `LORA_RANK=64`
-- `LORA_ALPHA=64`
-- `LEARNING_RATE=1e-6`
-- `TOTAL_TRAINING_STEPS=400`
-- `TEMPERATURE=1.0`
-- `TOP_P=0.95`
-- `SAVE_FREQ=50`
-- `TEST_FREQ=25`
-- `GPU_MEMORY_UTILIZATION=0.45`
-- `N_GPUS=1`
+- `GRPO_PROJECT_NAME=game24-grpo`
+- `GRPO_EXPERIMENT_NAME=game24-grpo-smoke`
+- `GRPO_LOGGER=console`
+- `GRPO_TRAIN_BATCH_SIZE=16`
+- `GRPO_ROLLOUT_N=16`
+- `GRPO_PPO_MINI_BATCH_SIZE=16`
+- `GRPO_PPO_MICRO_BATCH_SIZE_PER_GPU=1`
+- `GRPO_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=1`
+- `GRPO_REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=1`
+- `GRPO_MAX_PROMPT_LENGTH=192`
+- `GRPO_MAX_RESPONSE_LENGTH=256`
+- `GRPO_LORA_RANK=64`
+- `GRPO_LORA_ALPHA=64`
+- `GRPO_LEARNING_RATE=1e-6`
+- `GRPO_TOTAL_TRAINING_STEPS=400`
+- `GRPO_TEMPERATURE=1.0`
+- `GRPO_TOP_P=0.95`
+- `GRPO_SAVE_FREQ=50`
+- `GRPO_TEST_FREQ=25`
+- `GRPO_GPU_MEMORY_UTILIZATION=0.45`
+- `GRPO_N_GPUS=1`
 
-The GRPO script still uses vLLM rollout, KL loss, checkpoint saving, console and WandB logging, and the custom reward function `game24/reward.py:compute_score`.
+The GRPO script still uses vLLM rollout, KL loss, checkpoint saving, console logging by default, and the custom reward function `game24/reward.py:compute_score`. GRPO-specific environment variables take priority and are used by default so that sourced SFT settings such as `PROJECT_NAME`, `EXPERIMENT_NAME`, or `LOGGER` do not leak into GRPO runs.
+
+For smoke runs, keep all per-GPU micro-batch settings at `1`. After the job is stable, increase `GRPO_PPO_MICRO_BATCH_SIZE_PER_GPU`, `GRPO_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU`, and `GRPO_REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU` gradually to improve throughput. Do not rely on the verl default `actor_rollout_ref.actor.ppo_mini_batch_size`; set `GRPO_PPO_MINI_BATCH_SIZE` explicitly, keep it positive, ensure it is no larger than `GRPO_TRAIN_BATCH_SIZE`, and ensure `GRPO_TRAIN_BATCH_SIZE` is divisible by it.
 
 This script currently does not add an attention backend override under `actor_rollout_ref.model.override_config`, so it does not have the same Hydra struct failure mode as the SFT script. If a future GRPO run needs a Transformers actor/ref attention override, add it with the same narrow per-key Hydra add/update semantics and verify from the installed verl v0.7.1 source that the key reaches the FSDP actor/ref model path without being applied to vLLM rollout internals.
 
