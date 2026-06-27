@@ -183,8 +183,10 @@ Trajectory text keeps remaining-value lists compact, such as `5/6`, but wraps no
 - `SAVE_FREQ=-1`
 - `TEST_FREQ=-1`
 - `DTYPE=bfloat16`
+- `SFT_ATTENTION_IMPLEMENTATION=sdpa`
+- `SFT_USE_REMOVE_PADDING=False`
 
-The script sets `data.messages_key=messages`, FSDP, BF16, gradient checkpointing, remove padding, and `checkpoint.save_contents=["model","optimizer","extra","hf_model"]`. The actual checkpoint directory layout must still be validated on the server.
+The script sets `data.messages_key=messages`, FSDP, BF16, gradient checkpointing, `model.override_config.attn_implementation=sdpa`, and `checkpoint.save_contents=["model","optimizer","extra","hf_model"]`. The default `sdpa` attention backend and `SFT_USE_REMOVE_PADDING=False` avoid requiring `flash_attn` for smoke tests and default server runs. Set `SFT_ATTENTION_IMPLEMENTATION=flash_attention_2 SFT_USE_REMOVE_PADDING=True` only on environments where FlashAttention2 is installed. The actual checkpoint directory layout must still be validated on the server.
 
 ## GRPO After SFT
 

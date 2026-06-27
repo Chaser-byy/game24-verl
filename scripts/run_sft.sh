@@ -24,6 +24,8 @@ TEST_FREQ="${TEST_FREQ:-${SFT_TEST_FREQ:--1}}"
 DTYPE="${DTYPE:-bfloat16}"
 LOGGER="${LOGGER:-[\"console\",\"wandb\"]}"
 CHECKPOINT_SAVE_CONTENTS="${CHECKPOINT_SAVE_CONTENTS:-${SFT_CHECKPOINT_SAVE_CONTENTS:-[\"model\",\"optimizer\",\"extra\",\"hf_model\"]}}"
+ATTENTION_IMPLEMENTATION="${ATTENTION_IMPLEMENTATION:-${SFT_ATTENTION_IMPLEMENTATION:-sdpa}}"
+USE_REMOVE_PADDING="${USE_REMOVE_PADDING:-${SFT_USE_REMOVE_PADDING:-False}}"
 
 cat <<CONFIG
 Game24 verl SFT configuration
@@ -45,6 +47,8 @@ Game24 verl SFT configuration
   SAVE_FREQ=${SAVE_FREQ}
   TEST_FREQ=${TEST_FREQ}
   DTYPE=${DTYPE}
+  ATTENTION_IMPLEMENTATION=${ATTENTION_IMPLEMENTATION}
+  USE_REMOVE_PADDING=${USE_REMOVE_PADDING}
   LOGGER=${LOGGER}
   CHECKPOINT_SAVE_CONTENTS=${CHECKPOINT_SAVE_CONTENTS}
 CONFIG
@@ -69,7 +73,8 @@ torchrun --standalone --nnodes=1 --nproc_per_node="${N_GPUS}" \
   model.path="${MODEL_PATH}" \
   model.trust_remote_code=True \
   model.enable_gradient_checkpointing=True \
-  model.use_remove_padding=True \
+  model.override_config.attn_implementation="${ATTENTION_IMPLEMENTATION}" \
+  model.use_remove_padding="${USE_REMOVE_PADDING}" \
   model.lora_rank=0 \
   engine.strategy=fsdp \
   engine.dtype="${DTYPE}" \
