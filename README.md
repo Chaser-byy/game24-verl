@@ -39,6 +39,7 @@ scripts/
   build_sft_data.py   Exact-solver SFT parquet generation from train IDs only
   run_sft.sh          Full-parameter SFT launch script for verl v0.7.1
   run_grpo_lora.sh    GRPO-LoRA launch script starting from exported SFT model
+  run_grpo_full.sh    Full-parameter GRPO launch script starting from exported SFT model
   evaluate.py         Server-side vLLM evaluation entry
   final_evaluation.py Strict raw/SFT/GRPO final evaluation and checkpoint selection
   run_final_evaluation.sh  Shell entry for final evaluation
@@ -239,6 +240,67 @@ For smoke runs, keep all per-GPU micro-batch settings at `1`. After the job is s
 GRPO defaults `GRPO_ATTN_IMPLEMENTATION=sdpa` and `GRPO_USE_REMOVE_PADDING=false` so the FSDP Actor/Reference Transformers path does not require `flash-attn` during smoke runs. The script passes the attention setting with Hydra's narrow dynamic-key syntax, `++actor_rollout_ref.model.override_config.attn_implementation=...`, because `attn_implementation` is not present in verl v0.7.1's structured `override_config` by default. This setting is for the Transformers Actor/Reference model path only; `actor_rollout_ref.rollout.name=vllm` remains unchanged and no vLLM attention backend override is added.
 
 A800 runs can separately test `GRPO_ATTN_IMPLEMENTATION=flash_attention_2 GRPO_USE_REMOVE_PADDING=true` after FlashAttention2 is installed and verified, but it is not required for the current smoke path. Always check the GRPO smoke log for `GRPO_ATTN_IMPLEMENTATION=sdpa` and `GRPO_USE_REMOVE_PADDING=false` in the printed launch summary before debugging deeper worker errors.
+
+## Full-Parameter GRPO
+
+`scripts/run_grpo_full.sh` is the formal full-parameter GRPO path for verl v0.7.1 after SFT. It is separate from `scripts/run_grpo_lora.sh` and uses only `FULL_GRPO_*` environment variables.
+
+Required input:
+
+```bash
+FULL_GRPO_MODEL_PATH=/path/to/exported-sft-hf-model
+```
+
+Default formal training settings:
+
+- `FULL_GRPO_TRAIN_BATCH_SIZE=8`
+- `FULL_GRPO_ROLLOUT_N=8`
+- `FULL_GRPO_MAX_PROMPT_LENGTH=192`
+- `FULL_GRPO_MAX_RESPONSE_LENGTH=192`
+- `FULL_GRPO_PPO_MINI_BATCH_SIZE=8`
+- `FULL_GRPO_PPO_MICRO_BATCH_SIZE_PER_GPU=4`
+- `FULL_GRPO_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=16`
+- `FULL_GRPO_REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=16`
+- `FULL_GRPO_LEARNING_RATE=3e-7`
+- `FULL_GRPO_TOTAL_TRAINING_STEPS=200`
+- `FULL_GRPO_SAVE_FREQ=25`
+- `FULL_GRPO_TEST_FREQ=25`
+- `FULL_GRPO_VAL_BEFORE_TRAIN=true`
+- `FULL_GRPO_ATTN_IMPLEMENTATION=sdpa`
+- `FULL_GRPO_USE_REMOVE_PADDING=false`
+- `FULL_GRPO_GPU_MEMORY_UTILIZATION=0.35`
+- `FULL_GRPO_USE_KL_LOSS=true`
+- `FULL_GRPO_KL_LOSS_COEF=0.001`
+
+LoRA is disabled with verl's `actor_rollout_ref.model.lora_rank=0`; the script does not pass `lora_alpha`, `target_modules`, or a LoRA adapter path. The launch summary prints that LoRA is disabled, full-parameter training is enabled, and the trainable and total parameter counts are equal.
+
+Training uses `FULL_GRPO_TRAIN_FILE=data/game24/train.parquet` and internal validation uses `FULL_GRPO_VAL_FILE=data/game24/val.parquet`. verl runs validation before training and every 25 steps through `trainer.val_before_train=true` and `trainer.test_freq=25`. Checkpoints are saved every 25 steps under:
+
+```text
+outputs/game24-grpo-full-param/global_step_xxx/
+```
+
+The actor checkpoint is configured with:
+
+```text
+actor_rollout_ref.actor.checkpoint.save_contents=["model","optimizer","extra","hf_model"]
+```
+
+This preserves the full actor state, optimizer state, extra trainer state, and a Hugging Face model artifact when supported by the local verl setup. If the server only writes the sharded FSDP actor state, use verl's merger on the saved actor directory:
+
+```bash
+python -m verl.model_merger merge \
+  --backend fsdp \
+  --local_dir outputs/game24-grpo-full-param/global_step_xxx/actor \
+  --target_dir outputs/game24-grpo-full-param/global_step_xxx/huggingface
+```
+
+Start the formal 200-step full-parameter run:
+
+```bash
+FULL_GRPO_MODEL_PATH=/root/autodl-tmp/outputs/game24-sft-full/global_step_363/huggingface \
+bash scripts/run_grpo_full.sh
+```
 
 ## Final Evaluation
 
