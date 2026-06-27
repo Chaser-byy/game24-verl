@@ -40,6 +40,8 @@ scripts/
   run_sft.sh          Full-parameter SFT launch script for verl v0.7.1
   run_grpo_lora.sh    GRPO-LoRA launch script starting from exported SFT model
   evaluate.py         Server-side vLLM evaluation entry
+  final_evaluation.py Strict raw/SFT/GRPO final evaluation and checkpoint selection
+  run_final_evaluation.sh  Shell entry for final evaluation
 configs/
   default.env.example
 ```
@@ -109,9 +111,9 @@ GRPO_MODEL_PATH=outputs/game24-sft-hf bash scripts/run_grpo_lora.sh
 
 7. Run GRPO-LoRA with rollout `n=16`.
 
-8. Select the best checkpoint by validation greedy Pass@1.
+8. Select the best checkpoint by validation greedy Pass@1 strict exact accuracy.
 
-9. Report final results on ordinary `test.parquet` and `tot_hard100.parquet`.
+9. Report final results on ordinary `test.parquet`, `tot_hard100.parquet`, and `unsolvable.parquet`.
 
 ## Why SFT First
 
@@ -238,7 +240,51 @@ GRPO defaults `GRPO_ATTN_IMPLEMENTATION=sdpa` and `GRPO_USE_REMOVE_PADDING=false
 
 A800 runs can separately test `GRPO_ATTN_IMPLEMENTATION=flash_attention_2 GRPO_USE_REMOVE_PADDING=true` after FlashAttention2 is installed and verified, but it is not required for the current smoke path. Always check the GRPO smoke log for `GRPO_ATTN_IMPLEMENTATION=sdpa` and `GRPO_USE_REMOVE_PADDING=false` in the printed launch summary before debugging deeper worker errors.
 
-## Evaluation
+## Final Evaluation
+
+Use the final evaluation entry after GRPO training has produced LoRA checkpoints. The flow is intentionally fixed:
+
+```text
+evaluate every GRPO global_step_xxx checkpoint on val with greedy Pass@1
+-> choose the highest strict exact accuracy, tie-breaking to the earlier step
+-> evaluate raw Qwen, SFT, and the selected GRPO LoRA on test, hard100, and unsolvable
+```
+
+The strict exact accuracy is `VerificationResult.is_correct` from `game24/verifier.py`: exactly one `<answer>` tag, a parsable AST-whitelisted arithmetic expression, exact input number multiset usage, and exact `Fraction` value equal to 24. `reward_mean` is reported separately and must not be read as accuracy because the reward function contains partial rewards.
+
+GRPO checkpoints are loaded as PEFT adapters:
+
+```text
+base model = exported SFT Hugging Face directory
+adapter = global_step_xxx/actor/lora_adapter
+```
+
+Do not treat `actor/huggingface` as a complete standalone GRPO model unless a separate export step has explicitly produced one.
+
+Run the full final evaluation on the server:
+
+```bash
+RAW_MODEL_PATH=Qwen/Qwen2.5-1.5B-Instruct \
+SFT_MODEL_PATH=/root/autodl-tmp/outputs/game24-sft-full/global_step_363/huggingface \
+GRPO_RUN_DIR=/root/autodl-tmp/outputs/YOUR_GRPO_RUN_DIR \
+EVAL_DATA_DIR=data/game24 \
+EVAL_OUTPUT_DIR=outputs/evaluation \
+bash scripts/run_final_evaluation.sh
+```
+
+The script discovers `val`, `test`, `hard100`, and `unsolvable` parquet files under `EVAL_DATA_DIR` instead of hard-coding filenames. It writes:
+
+```text
+outputs/evaluation/checkpoint_selection.csv
+outputs/evaluation/final_results.json
+outputs/evaluation/predictions/*.jsonl
+```
+
+`checkpoint_selection.csv` includes `step`, `exact_correct`, `total`, `exact_accuracy`, `format_rate`, `number_usage_rate`, `parse_rate`, and `reward_mean`. Final summaries include greedy Pass@1 and sampling Pass@8 metrics for each model and dataset. For Pass@8, the reported solved rate is the fraction of problems with at least one strictly correct sample; the average correct sample count is reported separately.
+
+Every prediction JSONL row stores the model name, dataset name, problem ID, input numbers, full generated text, extracted answer, strict verification dictionary, failure reason, and reward.
+
+## Single-Model Evaluation
 
 Evaluate one parquet file:
 

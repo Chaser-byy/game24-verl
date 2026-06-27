@@ -5,4 +5,7 @@
 
 datasets
 pandas
+peft
 pyarrow
+safetensors
+transformers
