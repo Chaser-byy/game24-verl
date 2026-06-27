@@ -33,12 +33,16 @@ game24/
   solver.py        Exact Fraction-based 24-point solver for SFT trajectories
   trajectory.py    Compact XML assistant responses from solver derivations
   reward.py        verl custom reward entry point
+  reward_strict.py Strict 0/1 reward entry point for improved GRPO
+  strict_dapo_reward_manager.py  DAPO-style strict group diagnostics
   metrics.py       Evaluation metric aggregation helpers
 scripts/
   prepare_data.py     Server-side RL parquet generation
   build_sft_data.py   Exact-solver SFT parquet generation from train IDs only
+  audit_game24_boundaries.py  Canonical split leakage audit
   run_sft.sh          Full-parameter SFT launch script for verl v0.7.1
   run_grpo_lora.sh    GRPO-LoRA launch script starting from exported SFT model
+  run_grpo_lora_improved.sh  Improved strict-reward LoRA GRPO launch script
   run_grpo_full.sh    Full-parameter GRPO launch script starting from exported SFT model
   evaluate.py         Server-side vLLM evaluation entry
   final_evaluation.py Strict raw/SFT/GRPO final evaluation and checkpoint selection
@@ -240,6 +244,90 @@ For smoke runs, keep all per-GPU micro-batch settings at `1`. After the job is s
 GRPO defaults `GRPO_ATTN_IMPLEMENTATION=sdpa` and `GRPO_USE_REMOVE_PADDING=false` so the FSDP Actor/Reference Transformers path does not require `flash-attn` during smoke runs. The script passes the attention setting with Hydra's narrow dynamic-key syntax, `++actor_rollout_ref.model.override_config.attn_implementation=...`, because `attn_implementation` is not present in verl v0.7.1's structured `override_config` by default. This setting is for the Transformers Actor/Reference model path only; `actor_rollout_ref.rollout.name=vllm` remains unchanged and no vLLM attention backend override is added.
 
 A800 runs can separately test `GRPO_ATTN_IMPLEMENTATION=flash_attention_2 GRPO_USE_REMOVE_PADDING=true` after FlashAttention2 is installed and verified, but it is not required for the current smoke path. Always check the GRPO smoke log for `GRPO_ATTN_IMPLEMENTATION=sdpa` and `GRPO_USE_REMOVE_PADDING=false` in the printed launch summary before debugging deeper worker errors.
+
+## Improved LoRA GRPO
+
+`scripts/run_grpo_lora_improved.sh` is an isolated LoRA GRPO experiment intended to improve strict greedy Pass@1. It does not modify or replace the original `scripts/run_grpo_lora.sh` baseline, and it uses only `IMPROVED_GRPO_*` variables. It starts fresh from the exported SFT Hugging Face model and does not resume old GRPO checkpoints or load old GRPO LoRA adapters.
+
+The main differences from the original LoRA baseline are:
+
+- strict 0/1 training reward in `game24/reward_strict.py`;
+- DAPO-style reward manager `game24/strict_dapo_reward_manager.py` for strict `acc` and group diagnostics;
+- `IMPROVED_GRPO_ROLLOUT_N=16`;
+- `IMPROVED_GRPO_GEN_BATCH_SIZE=24` candidate prompts versus `IMPROVED_GRPO_TRAIN_BATCH_SIZE=8` target effective prompts;
+- actor KL loss disabled and KL coefficient set to `0`;
+- PPO epochs increased to `2`;
+- asymmetric clipping through `clip_ratio_low=0.20`, `clip_ratio_high=0.28`, and `clip_ratio_c=10.0`;
+- `loss_agg_mode=seq-mean-token-mean`;
+- validation every 10 steps with greedy `do_sample=False`, `n=1`.
+
+The strict reward returns `score=1.0` only when `verify_solution()` reports `is_correct=True`; every other response gets `score=0.0`. Diagnostic fields such as `format_valid`, `parse_valid`, `number_usage_valid`, `response_length`, and strict `acc` are logged separately and do not create shaped reward.
+
+The reward manager groups rollouts by verl `uid` when present, otherwise by `tuple(sorted(numbers))` and target. It records:
+
+```text
+k_correct
+k_correct_hist_0 ... k_correct_hist_16
+all_wrong_rate
+all_correct_rate
+mixed_group_rate
+generated_prompt_count
+accepted_prompt_count
+acceptance_rate
+generation_rounds
+zero_reward_std_rate
+response_length
+```
+
+It also prints batch-level strict metrics in the log, including `strict_exact=correct/total`, strict accuracy, format rate, parse rate, number usage rate, mean response length, and mixed group rate. For a 64-question validation split this gives raw counts such as `12/64`, not only percentages.
+
+In verl v0.7.1, the trainer reads `data.gen_batch_size` even though it is not declared in `legacy_data.yaml`, so the script passes it with Hydra's dynamic-field syntax: `++data.gen_batch_size=24`. The script does not invent higher-version `algorithm.filter_groups.*` keys. All-wrong and all-correct groups have zero reward standard deviation under strict 0/1 GRPO, so they produce no policy-gradient signal when actor KL loss is disabled; the group diagnostics make that visible in logs. If a future server-side verl v0.7.1 build exposes explicit group-filtering keys, add them only after confirming that exact build's config surface.
+
+Before launch, `scripts/audit_game24_boundaries.py` checks canonical IDs using `tuple(sorted(numbers))` and fails on any overlap between:
+
+```text
+train vs val
+train vs test
+train vs hard100
+SFT train vs project val
+SFT train vs project test
+SFT train vs hard100
+```
+
+`test`, `tot_hard100`, and `unsolvable` are not used for training, rollout generation, dynamic candidate generation, or checkpoint selection. `test` and `hard100` are read only by the launch-time leakage audit. Hyperparameters and checkpoint selection should be adjusted only from project validation behavior; test and hard100 remain frozen.
+
+Default improved settings:
+
+- `IMPROVED_GRPO_TRAIN_BATCH_SIZE=8`
+- `IMPROVED_GRPO_GEN_BATCH_SIZE=24`
+- `IMPROVED_GRPO_MAX_GEN_BATCHES=4`
+- `IMPROVED_GRPO_ROLLOUT_N=16`
+- `IMPROVED_GRPO_MAX_PROMPT_LENGTH=192`
+- `IMPROVED_GRPO_MAX_RESPONSE_LENGTH=192`
+- `IMPROVED_GRPO_LORA_RANK=64`
+- `IMPROVED_GRPO_LORA_ALPHA=64`
+- `IMPROVED_GRPO_TARGET_MODULES=all-linear`
+- `IMPROVED_GRPO_PPO_MINI_BATCH_SIZE=4`
+- `IMPROVED_GRPO_PPO_EPOCHS=2`
+- `IMPROVED_GRPO_PPO_MICRO_BATCH_SIZE_PER_GPU=32`
+- `IMPROVED_GRPO_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=64`
+- `IMPROVED_GRPO_REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=64`
+- `IMPROVED_GRPO_LEARNING_RATE=5e-6`
+- `IMPROVED_GRPO_TEMPERATURE=1.0`
+- `IMPROVED_GRPO_TOP_P=1.0`
+- `IMPROVED_GRPO_TOP_K=-1`
+- `IMPROVED_GRPO_TOTAL_TRAINING_STEPS=200`
+- `IMPROVED_GRPO_TEST_FREQ=10`
+- `IMPROVED_GRPO_SAVE_FREQ=20`
+
+`lora_dropout` and explicit gradient clipping are printed in the launch summary but not passed as Hydra overrides because the checked verl v0.7.1 model/actor configs do not expose verified keys for them. This avoids silently creating unused fields.
+
+Start the formal improved LoRA run:
+
+```bash
+IMPROVED_GRPO_MODEL_PATH=/root/autodl-tmp/outputs/game24-sft-full/global_step_363/huggingface \
+bash scripts/run_grpo_lora_improved.sh
+```
 
 ## Full-Parameter GRPO
 
