@@ -209,9 +209,9 @@ Default GRPO-LoRA settings:
 - `GRPO_PROJECT_NAME=game24-grpo`
 - `GRPO_EXPERIMENT_NAME=game24-grpo-smoke`
 - `GRPO_LOGGER=console`
-- `GRPO_TRAIN_BATCH_SIZE=16`
-- `GRPO_ROLLOUT_N=16`
-- `GRPO_PPO_MINI_BATCH_SIZE=16`
+- `GRPO_TRAIN_BATCH_SIZE=4`
+- `GRPO_ROLLOUT_N=4`
+- `GRPO_PPO_MINI_BATCH_SIZE=4`
 - `GRPO_PPO_MICRO_BATCH_SIZE_PER_GPU=1`
 - `GRPO_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=1`
 - `GRPO_REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=1`
@@ -220,9 +220,11 @@ Default GRPO-LoRA settings:
 - `GRPO_LORA_RANK=64`
 - `GRPO_LORA_ALPHA=64`
 - `GRPO_LEARNING_RATE=1e-6`
-- `GRPO_TOTAL_TRAINING_STEPS=400`
+- `GRPO_TOTAL_TRAINING_STEPS=5`
 - `GRPO_TEMPERATURE=1.0`
 - `GRPO_TOP_P=0.95`
+- `GRPO_ATTN_IMPLEMENTATION=sdpa`
+- `GRPO_USE_REMOVE_PADDING=false`
 - `GRPO_SAVE_FREQ=50`
 - `GRPO_TEST_FREQ=25`
 - `GRPO_GPU_MEMORY_UTILIZATION=0.45`
@@ -232,7 +234,9 @@ The GRPO script still uses vLLM rollout, KL loss, checkpoint saving, console log
 
 For smoke runs, keep all per-GPU micro-batch settings at `1`. After the job is stable, increase `GRPO_PPO_MICRO_BATCH_SIZE_PER_GPU`, `GRPO_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU`, and `GRPO_REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU` gradually to improve throughput. Do not rely on the verl default `actor_rollout_ref.actor.ppo_mini_batch_size`; set `GRPO_PPO_MINI_BATCH_SIZE` explicitly, keep it positive, ensure it is no larger than `GRPO_TRAIN_BATCH_SIZE`, and ensure `GRPO_TRAIN_BATCH_SIZE` is divisible by it.
 
-This script currently does not add an attention backend override under `actor_rollout_ref.model.override_config`, so it does not have the same Hydra struct failure mode as the SFT script. If a future GRPO run needs a Transformers actor/ref attention override, add it with the same narrow per-key Hydra add/update semantics and verify from the installed verl v0.7.1 source that the key reaches the FSDP actor/ref model path without being applied to vLLM rollout internals.
+GRPO defaults `GRPO_ATTN_IMPLEMENTATION=sdpa` and `GRPO_USE_REMOVE_PADDING=false` so the FSDP Actor/Reference Transformers path does not require `flash-attn` during smoke runs. The script passes the attention setting with Hydra's narrow dynamic-key syntax, `++actor_rollout_ref.model.override_config.attn_implementation=...`, because `attn_implementation` is not present in verl v0.7.1's structured `override_config` by default. This setting is for the Transformers Actor/Reference model path only; `actor_rollout_ref.rollout.name=vllm` remains unchanged and no vLLM attention backend override is added.
+
+A800 runs can separately test `GRPO_ATTN_IMPLEMENTATION=flash_attention_2 GRPO_USE_REMOVE_PADDING=true` after FlashAttention2 is installed and verified, but it is not required for the current smoke path. Always check the GRPO smoke log for `GRPO_ATTN_IMPLEMENTATION=sdpa` and `GRPO_USE_REMOVE_PADDING=false` in the printed launch summary before debugging deeper worker errors.
 
 ## Evaluation
 
