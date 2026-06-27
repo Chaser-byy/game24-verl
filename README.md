@@ -242,15 +242,26 @@ A800 runs can separately test `GRPO_ATTN_IMPLEMENTATION=flash_attention_2 GRPO_U
 
 ## Final Evaluation
 
-Use the final evaluation entry after GRPO training has produced LoRA checkpoints. The flow is intentionally fixed:
+Use the final evaluation entry after GRPO training has produced LoRA checkpoints. The default mode is a fast diagnostic pass:
 
 ```text
-evaluate every GRPO global_step_xxx checkpoint on val with greedy Pass@1
+EVAL_MODE=quick
+-> evaluate every GRPO global_step_xxx checkpoint on val with greedy Pass@1
 -> choose the highest strict exact accuracy, tie-breaking to the earlier step
--> evaluate raw Qwen, SFT, and the selected GRPO LoRA on test, hard100, and unsolvable
+-> evaluate SFT and the selected GRPO LoRA on val and test with greedy Pass@1
 ```
 
 The strict exact accuracy is `VerificationResult.is_correct` from `game24/verifier.py`: exactly one `<answer>` tag, a parsable AST-whitelisted arithmetic expression, exact input number multiset usage, and exact `Fraction` value equal to 24. `reward_mean` is reported separately and must not be read as accuracy because the reward function contains partial rewards.
+
+The quick mode intentionally skips raw Qwen, Pass@8, hard100, and unsolvable so the first server check can answer whether SFT and GRPO use the same prompt path and whether strict validation behaves as expected. It writes only the first `EVAL_DIAGNOSTIC_LIMIT=20` prediction rows per model/dataset while still computing metrics on the full split.
+
+For the full report, set:
+
+```bash
+EVAL_MODE=full
+```
+
+Full mode keeps the val-only GRPO checkpoint selection, then evaluates raw Qwen, SFT, and the selected GRPO LoRA on `test`, `tot_hard100`, and `unsolvable` with greedy Pass@1 and sampling Pass@8.
 
 GRPO checkpoints are loaded as PEFT adapters:
 
@@ -261,28 +272,52 @@ adapter = global_step_xxx/actor/lora_adapter
 
 Do not treat `actor/huggingface` as a complete standalone GRPO model unless a separate export step has explicitly produced one.
 
-Run the full final evaluation on the server:
+Checkpoint selection loads the SFT base model once, then loads/switches one PEFT LoRA adapter per `global_step_xxx` using a single active adapter name. This avoids repeatedly reading the full SFT model from disk and prevents adapter stacking.
+
+Generation is batched. `EVAL_BATCH_SIZE=32` means one `model.generate()` call per batch of prompts, and Pass@8 uses `num_return_sequences=8` in that same batched generation call rather than looping eight times in Python. Each batch is verified and written to JSONL immediately, with progress printed after every batch.
+
+Run the quick evaluation on the server:
 
 ```bash
+EVAL_MODE=quick \
 RAW_MODEL_PATH=Qwen/Qwen2.5-1.5B-Instruct \
 SFT_MODEL_PATH=/root/autodl-tmp/outputs/game24-sft-full/global_step_363/huggingface \
 GRPO_RUN_DIR=/root/autodl-tmp/outputs/YOUR_GRPO_RUN_DIR \
 EVAL_DATA_DIR=data/game24 \
 EVAL_OUTPUT_DIR=outputs/evaluation \
+EVAL_BATCH_SIZE=32 \
+EVAL_MAX_NEW_TOKENS=192 \
 bash scripts/run_final_evaluation.sh
 ```
 
-The script discovers `val`, `test`, `hard100`, and `unsolvable` parquet files under `EVAL_DATA_DIR` instead of hard-coding filenames. It writes:
+The script discovers parquet files under `EVAL_DATA_DIR` instead of hard-coding filenames. Quick mode requires `train`, `val`, and `test`; full mode additionally requires `hard100` and `unsolvable`.
+
+Quick mode writes:
+
+```text
+outputs/evaluation/checkpoint_selection.csv
+outputs/evaluation/quick_results.json
+outputs/evaluation/prompt_audit.json
+outputs/evaluation/predictions/sft_val.jsonl
+outputs/evaluation/predictions/grpo_val.jsonl
+outputs/evaluation/predictions/sft_test.jsonl
+outputs/evaluation/predictions/grpo_test.jsonl
+```
+
+Full mode writes:
 
 ```text
 outputs/evaluation/checkpoint_selection.csv
 outputs/evaluation/final_results.json
+outputs/evaluation/prompt_audit.json
 outputs/evaluation/predictions/*.jsonl
 ```
 
 `checkpoint_selection.csv` includes `step`, `exact_correct`, `total`, `exact_accuracy`, `format_rate`, `number_usage_rate`, `parse_rate`, and `reward_mean`. Final summaries include greedy Pass@1 and sampling Pass@8 metrics for each model and dataset. For Pass@8, the reported solved rate is the fraction of problems with at least one strictly correct sample; the average correct sample count is reported separately.
 
 Every prediction JSONL row stores the model name, dataset name, problem ID, input numbers, full generated text, extracted answer, strict verification dictionary, failure reason, and reward.
+
+`prompt_audit.json` reads one row from the training parquet and records the original training messages, the rendered training prompt, the rendered evaluation prompt, token IDs for both, whether the token IDs are identical, the tokenizer chat template, EOS token, padding side, input number order, and `EVAL_MAX_NEW_TOKENS`. A mismatch fails the run because evaluation must use the training parquet prompt instead of inventing a different prompt.
 
 ## Single-Model Evaluation
 
