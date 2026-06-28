@@ -78,6 +78,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_new_tokens": 192,
         "do_sample": False,
         "num_return_sequences": 1,
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "top_k": None,
         "dtype": "bfloat16",
         "attention_implementation": "sdpa",
         "device": "cuda",
@@ -129,36 +132,70 @@ class ResolvedModel:
 @dataclass
 class SplitTotals:
     total: int = 0
+    sample_n: int = 0
     exact_correct: int = 0
     format_valid: int = 0
     parse_valid: int = 0
     number_usage_valid: int = 0
     reward_sum: float = 0.0
+    pass_at_n_correct: int = 0
+    correct_sample_sum: int = 0
+    generated_sample_count: int = 0
 
-    def update(self, verification: Any, reward: float) -> None:
+    def update_problem(
+        self,
+        responses: Sequence[str],
+        first_verification: Any,
+        first_reward: float,
+        correct_samples: int,
+    ) -> None:
         self.total += 1
-        self.exact_correct += int(verification.is_correct)
-        self.format_valid += int(verification.format_valid)
-        self.parse_valid += int(verification.parse_valid)
-        self.number_usage_valid += int(verification.numbers_valid)
-        self.reward_sum += reward
+        self.sample_n = max(self.sample_n, len(responses))
+        self.exact_correct += int(first_verification.is_correct)
+        self.format_valid += int(first_verification.format_valid)
+        self.parse_valid += int(first_verification.parse_valid)
+        self.number_usage_valid += int(first_verification.numbers_valid)
+        self.reward_sum += first_reward
+        self.pass_at_n_correct += int(correct_samples > 0)
+        self.correct_sample_sum += correct_samples
+        self.generated_sample_count += len(responses)
 
-    def summary(self, *, split: str, elapsed_seconds: float, predictions_path: Path | None) -> dict[str, Any]:
+    def summary(
+        self,
+        *,
+        split: str,
+        mode: str,
+        elapsed_seconds: float,
+        predictions_path: Path | None,
+    ) -> dict[str, Any]:
         summary = {
             "split": split,
+            "mode": mode,
             "total": self.total,
+            "sample_n": self.sample_n,
             "exact_correct": self.exact_correct,
             "exact_accuracy": self.exact_correct / self.total if self.total else 0.0,
             "format_rate": self.format_valid / self.total if self.total else 0.0,
             "parse_rate": self.parse_valid / self.total if self.total else 0.0,
             "number_usage_rate": self.number_usage_valid / self.total if self.total else 0.0,
             "reward_mean": self.reward_sum / self.total if self.total else 0.0,
+            "generated_sample_count": self.generated_sample_count,
             "elapsed_seconds": elapsed_seconds,
             "predictions_path": str(predictions_path) if predictions_path is not None else None,
         }
+        if self.sample_n > 1:
+            summary.update(
+                {
+                    "pass_at_n_correct": self.pass_at_n_correct,
+                    "pass_at_n_rate": self.pass_at_n_correct / self.total if self.total else 0.0,
+                    "average_correct_samples_per_problem": (
+                        self.correct_sample_sum / self.total if self.total else 0.0
+                    ),
+                }
+            )
         if split == "unsolvable":
-            summary["hallucinated_exact_correct"] = self.exact_correct
-            summary["hallucinated_exact_rate"] = summary["exact_accuracy"]
+            summary["hallucinated_exact_correct"] = summary.get("pass_at_n_correct", self.exact_correct)
+            summary["hallucinated_exact_rate"] = summary.get("pass_at_n_rate", summary["exact_accuracy"])
         return summary
 
 
@@ -883,10 +920,24 @@ def prompt_text(problem: Problem, tokenizer: Any, config: Mapping[str, Any]) -> 
     return rendered
 
 
-def generate_batch(model: Any, tokenizer: Any, problems: Sequence[Problem], config: Mapping[str, Any]) -> list[str]:
+def generation_mode(config: Mapping[str, Any]) -> str:
+    eval_cfg = config["evaluation"]
+    sample_n = int(eval_cfg["num_return_sequences"])
+    if bool(eval_cfg["do_sample"]):
+        return f"sampling_pass{sample_n}"
+    return "greedy_pass1"
+
+
+def generate_batch(
+    model: Any,
+    tokenizer: Any,
+    problems: Sequence[Problem],
+    config: Mapping[str, Any],
+) -> list[list[str]]:
     import torch
 
     eval_cfg = config["evaluation"]
+    sample_n = int(eval_cfg["num_return_sequences"])
     prompts = [prompt_text(problem, tokenizer, config) for problem in problems]
     encoded = tokenizer(prompts, return_tensors="pt", padding=True)
     device = next(model.parameters()).device
@@ -895,17 +946,31 @@ def generate_batch(model: Any, tokenizer: Any, problems: Sequence[Problem], conf
     generation_kwargs: dict[str, Any] = {
         "max_new_tokens": int(eval_cfg["max_new_tokens"]),
         "do_sample": bool(eval_cfg["do_sample"]),
-        "num_return_sequences": int(eval_cfg["num_return_sequences"]),
+        "num_return_sequences": sample_n,
         "pad_token_id": tokenizer.pad_token_id,
     }
     if tokenizer.eos_token_id is not None:
         generation_kwargs["eos_token_id"] = tokenizer.eos_token_id
+    if bool(eval_cfg["do_sample"]):
+        generation_kwargs["temperature"] = float(eval_cfg["temperature"])
+        generation_kwargs["top_p"] = float(eval_cfg["top_p"])
+        if eval_cfg.get("top_k") is not None and int(eval_cfg["top_k"]) >= 0:
+            generation_kwargs["top_k"] = int(eval_cfg["top_k"])
 
     with torch.inference_mode():
         output_ids = model.generate(**encoded, **generation_kwargs)
 
     prompt_length = encoded["input_ids"].shape[1]
-    return tokenizer.batch_decode(output_ids[:, prompt_length:], skip_special_tokens=True)
+    decoded = tokenizer.batch_decode(output_ids[:, prompt_length:], skip_special_tokens=True)
+    expected = len(problems) * sample_n
+    if len(decoded) != expected:
+        raise RuntimeError(f"expected {expected} generated responses, got {len(decoded)}")
+
+    grouped: list[list[str]] = []
+    for batch_index in range(len(problems)):
+        start = batch_index * sample_n
+        grouped.append(decoded[start : start + sample_n])
+    return grouped
 
 
 def ground_truth(problem: Problem) -> dict[str, Any]:
@@ -926,8 +991,13 @@ def evaluate_split(
     output_dir: Path,
     config: Mapping[str, Any],
 ) -> dict[str, Any]:
+    from transformers import set_seed
+
     eval_cfg = config["evaluation"]
+    set_seed(int(eval_cfg["seed"]))
     batch_size = int(eval_cfg["batch_size"])
+    sample_n = int(eval_cfg["num_return_sequences"])
+    mode = generation_mode(config)
     predictions_path = output_dir / "predictions" / f"{split}.jsonl"
     if config["output"].get("save_predictions", True):
         predictions_path.parent.mkdir(parents=True, exist_ok=True)
@@ -942,45 +1012,79 @@ def evaluate_split(
     try:
         for batch_index, start in enumerate(range(0, len(problems), batch_size), start=1):
             batch = problems[start : start + batch_size]
-            responses = generate_batch(model, tokenizer, batch, config)
-            if len(responses) != len(batch):
-                raise RuntimeError(f"expected {len(batch)} responses, got {len(responses)}")
+            response_groups = generate_batch(model, tokenizer, batch, config)
+            if len(response_groups) != len(batch):
+                raise RuntimeError(f"expected {len(batch)} response groups, got {len(response_groups)}")
 
-            for offset, (problem, response) in enumerate(zip(batch, responses, strict=True)):
-                verification = verify_solution(response, problem.numbers, target=problem.target)
-                reward = float(compute_score("game24", response, ground_truth(problem)))
-                totals.update(verification, reward)
-                record = {
-                    "model_name": model_name,
-                    "split": split,
-                    "index": start + offset,
-                    "problem_id": problem.problem_id,
-                    "numbers": problem.numbers,
-                    "canonical_id": canonical_id(problem.numbers),
-                    "target": problem.target,
-                    "solvable": problem.solvable,
-                    "generation_text": response,
-                    "answer": verification.expression,
-                    "is_correct": verification.is_correct,
-                    "format_valid": verification.format_valid,
-                    "parse_valid": verification.parse_valid,
-                    "number_usage_valid": verification.numbers_valid,
-                    "error_reason": verification.error_reason,
-                    "reward": reward,
-                    "verification": verification.to_dict(),
-                }
-                if handle is not None:
-                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            for offset, (problem, responses) in enumerate(zip(batch, response_groups, strict=True)):
+                if len(responses) != sample_n:
+                    raise RuntimeError(
+                        f"expected {sample_n} responses for problem {problem.problem_id}, got {len(responses)}"
+                    )
+                sample_records: list[dict[str, Any]] = []
+                correct_samples = 0
+                first_verification = None
+                first_reward = 0.0
+
+                for sample_index, response in enumerate(responses):
+                    verification = verify_solution(response, problem.numbers, target=problem.target)
+                    reward = float(compute_score("game24", response, ground_truth(problem)))
+                    correct_samples += int(verification.is_correct)
+                    if sample_index == 0:
+                        first_verification = verification
+                        first_reward = reward
+
+                    sample_records.append(
+                        {
+                            "model_name": model_name,
+                            "split": split,
+                            "mode": mode,
+                            "index": start + offset,
+                            "problem_id": problem.problem_id,
+                            "numbers": problem.numbers,
+                            "canonical_id": canonical_id(problem.numbers),
+                            "target": problem.target,
+                            "solvable": problem.solvable,
+                            "sample_index": sample_index,
+                            "sample_n": sample_n,
+                            "generation_text": response,
+                            "answer": verification.expression,
+                            "is_correct": verification.is_correct,
+                            "format_valid": verification.format_valid,
+                            "parse_valid": verification.parse_valid,
+                            "number_usage_valid": verification.numbers_valid,
+                            "error_reason": verification.error_reason,
+                            "reward": reward,
+                            "verification": verification.to_dict(),
+                        }
+                    )
+
+                if first_verification is None:
+                    raise RuntimeError(f"generation returned zero responses for problem {problem.problem_id}")
+                totals.update_problem(responses, first_verification, first_reward, correct_samples)
+
+                for record in sample_records:
+                    record["correct_samples_for_problem"] = correct_samples
+                    record["problem_pass_at_n_correct"] = correct_samples > 0
+                    if handle is not None:
+                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
             if handle is not None:
                 handle.flush()
             elapsed = time.monotonic() - start_time
             accuracy = totals.exact_correct / totals.total if totals.total else 0.0
+            pass_at_n_rate = totals.pass_at_n_correct / totals.total if totals.total else 0.0
+            pass_at_n_text = (
+                f" pass@{sample_n}={totals.pass_at_n_correct}/{totals.total} "
+                f"pass_at_n_rate={pass_at_n_rate:.6f}"
+                if sample_n > 1
+                else ""
+            )
             print(
-                f"[{model_name}][{split}] batch {batch_index}/{total_batches} "
+                f"[{model_name}][{split}][{mode}] batch {batch_index}/{total_batches} "
                 f"completed={min(start + len(batch), len(problems))}/{len(problems)} "
                 f"strict_correct={totals.exact_correct}/{totals.total} "
-                f"exact_accuracy={accuracy:.6f} elapsed={elapsed:.1f}s"
+                f"exact_accuracy={accuracy:.6f}{pass_at_n_text} elapsed={elapsed:.1f}s"
             )
     finally:
         if handle is not None:
@@ -988,6 +1092,7 @@ def evaluate_split(
 
     return totals.summary(
         split=split,
+        mode=mode,
         elapsed_seconds=time.monotonic() - start_time,
         predictions_path=predictions_path,
     )
@@ -1048,11 +1153,56 @@ def validate_evaluation_config(config: Mapping[str, Any]) -> None:
         if int(eval_cfg[key]) <= 0:
             raise ValueError(f"evaluation.{key} must be positive")
     if bool(eval_cfg["do_sample"]):
-        raise ValueError("single-model strict evaluation is greedy Pass@1; evaluation.do_sample must be false")
-    if int(eval_cfg["num_return_sequences"]) != 1:
+        if float(eval_cfg["temperature"]) <= 0:
+            raise ValueError("evaluation.temperature must be positive when evaluation.do_sample=true")
+        if not (0 < float(eval_cfg["top_p"]) <= 1):
+            raise ValueError("evaluation.top_p must be in (0, 1] when evaluation.do_sample=true")
+        if eval_cfg.get("top_k") is not None and int(eval_cfg["top_k"]) < -1:
+            raise ValueError("evaluation.top_k must be non-negative, -1, or null")
+    elif int(eval_cfg["num_return_sequences"]) != 1:
         raise ValueError(
-            "single-model strict evaluation is greedy Pass@1; evaluation.num_return_sequences must be 1"
+            "sampling Pass@N requires evaluation.do_sample=true when "
+            "evaluation.num_return_sequences is greater than 1"
         )
+
+
+def parse_bool(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"expected a boolean value, got {value!r}")
+
+
+def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    if args.data_split is not None:
+        config["data"]["split"] = args.data_split
+        config["data"]["splits"] = None
+    if args.batch_size is not None:
+        config["evaluation"]["batch_size"] = args.batch_size
+    if args.max_new_tokens is not None:
+        config["evaluation"]["max_new_tokens"] = args.max_new_tokens
+    if args.seed is not None:
+        config["evaluation"]["seed"] = args.seed
+    if args.sample_pass_n is not None:
+        config["evaluation"]["num_return_sequences"] = args.sample_pass_n
+        if args.do_sample is None and args.sample_pass_n > 1:
+            config["evaluation"]["do_sample"] = True
+    if args.do_sample is not None:
+        config["evaluation"]["do_sample"] = parse_bool(args.do_sample)
+    if args.temperature is not None:
+        config["evaluation"]["temperature"] = args.temperature
+    if args.top_p is not None:
+        config["evaluation"]["top_p"] = args.top_p
+    if args.top_k is not None:
+        top_k = args.top_k.strip().lower()
+        config["evaluation"]["top_k"] = None if top_k in {"", "none", "null"} else int(top_k)
+    if args.output_dir is not None:
+        config["output"]["output_dir"] = args.output_dir
+    if args.overwrite:
+        config["output"]["overwrite"] = True
+    return config
 
 
 def cleanup_if_requested(resolved: ResolvedModel, config: Mapping[str, Any]) -> None:
@@ -1077,6 +1227,7 @@ def cleanup_if_requested(resolved: ResolvedModel, config: Mapping[str, Any]) -> 
 def run(args: argparse.Namespace) -> None:
     config_path = Path(args.config).expanduser().resolve()
     config = load_config(config_path)
+    config = apply_cli_overrides(config, args)
     root = project_root_from_config(config)
     validate_evaluation_config(config)
     resolved = resolve_model(config, root)
@@ -1189,6 +1340,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=str(PROJECT_ROOT / "configs/evaluation/single_model/default.yaml"))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--print-resolved-config", action="store_true")
+    parser.add_argument("--data-split", help="Override data.split, e.g. val, test, final, or all.")
+    parser.add_argument("--batch-size", type=int, help="Override evaluation.batch_size.")
+    parser.add_argument("--max-new-tokens", type=int, help="Override evaluation.max_new_tokens.")
+    parser.add_argument("--seed", type=int, help="Override evaluation.seed.")
+    parser.add_argument(
+        "--sample-pass-n",
+        type=int,
+        help="Run sampling Pass@N by setting evaluation.num_return_sequences=N; N>1 implies do_sample=true.",
+    )
+    parser.add_argument("--do-sample", choices=["true", "false"], help="Override evaluation.do_sample.")
+    parser.add_argument("--temperature", type=float, help="Override sampling temperature.")
+    parser.add_argument("--top-p", type=float, help="Override sampling top_p.")
+    parser.add_argument("--top-k", help="Override sampling top_k; use none/null to omit it.")
+    parser.add_argument("--output-dir", help="Override output.output_dir.")
+    parser.add_argument("--overwrite", action="store_true", help="Allow writing into a non-empty output directory.")
     args = parser.parse_args()
     if args.print_resolved_config:
         args.dry_run = True

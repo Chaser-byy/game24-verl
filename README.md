@@ -533,6 +533,17 @@ Outputs are written under:
 
 The directory contains `results.json`, split summaries, full prediction JSONL files, `prompt_audit.json`, `resolved_config.yaml`, and `evaluation.log`. Strict exact accuracy is computed only from `verification.is_correct` in `game24/verifier.py`; `reward_mean` is reported separately and is not accuracy. For `unsolvable`, `hallucinated_exact_rate` is the fraction of supposedly unsolvable problems where the strict verifier still found a valid exact-24 expression.
 
+The same single-model entry can run batched sampling Pass@N. Greedy Pass@1 remains the default; set `SINGLE_EVAL_PASS_N` to a value greater than 1 to enable sampling automatically:
+
+```bash
+SINGLE_EVAL_PASS_N=16 \
+SINGLE_EVAL_TEMPERATURE=0.7 \
+SINGLE_EVAL_TOP_P=0.95 \
+bash scripts/run_single_model_evaluation.sh
+```
+
+Sampling uses one batched `model.generate()` call per prompt batch with `num_return_sequences=N`, not a Python loop over N generations. The split summaries still keep `exact_accuracy` as the first generated sample's strict Pass@1, and add `pass_at_n_correct`, `pass_at_n_rate`, and `average_correct_samples_per_problem` when `N > 1`. Prediction JSONL rows include `sample_index`, `sample_n`, `correct_samples_for_problem`, and `problem_pass_at_n_correct`.
+
 ## Final Evaluation
 
 Use the final evaluation entry after GRPO training has produced LoRA checkpoints. The default mode is a fast diagnostic pass:
