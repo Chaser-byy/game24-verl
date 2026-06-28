@@ -440,7 +440,39 @@ game24-grpo-full-param-continue-*
 game24-grpo-full-param-*
 ```
 
-It skips evaluation/SFT/LoRA metadata directories, selects the highest numeric `global_step_*` with a recoverable actor checkpoint, then runs greedy strict Pass@1 on `val.parquet` and `test.parquet`.
+It skips evaluation/SFT/LoRA metadata directories, selects the highest numeric `global_step_*` with a recoverable actor checkpoint, then runs greedy strict Pass@1 on the splits selected by YAML config. The default config runs:
+
+```yaml
+data:
+  split: all
+  files:
+    val: val.parquet
+    test: test.parquet
+    tot_hard100: tot_hard100.parquet
+    unsolvable: unsolvable.parquet
+```
+
+`data.split` accepts:
+
+```text
+val
+test
+tot_hard100
+unsolvable
+both    # val + test
+final   # test + tot_hard100 + unsolvable
+all     # val + test + tot_hard100 + unsolvable
+```
+
+For exact control, set `data.splits`; it overrides `data.split`:
+
+```yaml
+data:
+  splits:
+    - test
+    - tot_hard100
+    - unsolvable
+```
 
 Checkpoint handling is automatic:
 
@@ -499,7 +531,7 @@ Outputs are written under:
 /root/autodl-tmp/outputs/single-model-evaluation/<run-name>/step_<N>/<timestamp>/
 ```
 
-The directory contains `results.json`, split summaries, full prediction JSONL files, `prompt_audit.json`, `resolved_config.yaml`, and `evaluation.log`. Strict exact accuracy is computed only from `verification.is_correct` in `game24/verifier.py`; `reward_mean` is reported separately and is not accuracy.
+The directory contains `results.json`, split summaries, full prediction JSONL files, `prompt_audit.json`, `resolved_config.yaml`, and `evaluation.log`. Strict exact accuracy is computed only from `verification.is_correct` in `game24/verifier.py`; `reward_mean` is reported separately and is not accuracy. For `unsolvable`, `hallucinated_exact_rate` is the fraction of supposedly unsolvable problems where the strict verifier still found a valid exact-24 expression.
 
 ## Final Evaluation
 

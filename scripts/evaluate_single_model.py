@@ -63,8 +63,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "data": {
         "data_dir": "/root/autodl-tmp/game24-verl/data/game24",
-        "files": {"val": "val.parquet", "test": "test.parquet"},
-        "split": "both",
+        "files": {
+            "val": "val.parquet",
+            "test": "test.parquet",
+            "tot_hard100": "tot_hard100.parquet",
+            "unsolvable": "unsolvable.parquet",
+        },
+        "split": "all",
+        "splits": None,
     },
     "evaluation": {
         "batch_size": 32,
@@ -138,7 +144,7 @@ class SplitTotals:
         self.reward_sum += reward
 
     def summary(self, *, split: str, elapsed_seconds: float, predictions_path: Path | None) -> dict[str, Any]:
-        return {
+        summary = {
             "split": split,
             "total": self.total,
             "exact_correct": self.exact_correct,
@@ -150,6 +156,10 @@ class SplitTotals:
             "elapsed_seconds": elapsed_seconds,
             "predictions_path": str(predictions_path) if predictions_path is not None else None,
         }
+        if split == "unsolvable":
+            summary["hallucinated_exact_correct"] = self.exact_correct
+            summary["hallucinated_exact_rate"] = summary["exact_accuracy"]
+        return summary
 
 
 class TeeStream:
@@ -501,13 +511,47 @@ def resolve_model(config: Mapping[str, Any], root: Path) -> ResolvedModel:
     raise ValueError(f"unsupported model.source: {source}")
 
 
+def normalize_split_name(value: str) -> str:
+    normalized = str(value).strip().lower().replace("-", "_")
+    if normalized in {"hard100", "tot", "tot_100", "tot_hard_100"}:
+        return "tot_hard100"
+    if normalized in {"valid", "validation"}:
+        return "val"
+    return normalized
+
+
 def selected_splits(config: Mapping[str, Any]) -> list[str]:
-    split = str(config["data"]["split"]).lower()
-    if split == "both":
-        return ["val", "test"]
-    if split in {"val", "test"}:
-        return [split]
-    raise ValueError("data.split must be val, test, or both")
+    data_cfg = config["data"]
+    valid = {"val", "test", "tot_hard100", "unsolvable"}
+
+    explicit_splits = data_cfg.get("splits")
+    if explicit_splits is not None:
+        if not isinstance(explicit_splits, Sequence) or isinstance(explicit_splits, (str, bytes, bytearray)):
+            raise ValueError("data.splits must be a list of split names")
+        splits = [normalize_split_name(str(item)) for item in explicit_splits]
+    else:
+        split = normalize_split_name(str(data_cfg["split"]))
+        if split == "both":
+            splits = ["val", "test"]
+        elif split == "final":
+            splits = ["test", "tot_hard100", "unsolvable"]
+        elif split == "all":
+            splits = ["val", "test", "tot_hard100", "unsolvable"]
+        else:
+            splits = [split]
+
+    unknown = [split for split in splits if split not in valid]
+    if unknown:
+        raise ValueError(
+            "unknown data split(s): "
+            f"{unknown}; valid values are val, test, tot_hard100, unsolvable, both, final, all"
+        )
+
+    deduped: list[str] = []
+    for split in splits:
+        if split not in deduped:
+            deduped.append(split)
+    return deduped
 
 
 def load_problem_file(path: Path) -> list[Any]:
@@ -523,6 +567,8 @@ def resolve_data_files(config: Mapping[str, Any], root: Path) -> dict[str, Path]
     result: dict[str, Path] = {}
     for split in selected_splits(config):
         file_name = files.get(split)
+        if file_name is None and split == "tot_hard100":
+            file_name = files.get("hard100")
         if not file_name:
             raise ValueError(f"data.files.{split} is required")
         path = Path(str(file_name)).expanduser()
@@ -1128,10 +1174,8 @@ def run(args: argparse.Namespace) -> None:
             ),
             "summaries": summaries,
         }
-        if "val" in summaries:
-            results["val"] = summaries["val"]
-        if "test" in summaries:
-            results["test"] = summaries["test"]
+        for split, summary in summaries.items():
+            results[split] = summary
         write_json(output_dir / "results.json", results)
         cleanup_if_requested(resolved, config)
         print("Evaluation complete")

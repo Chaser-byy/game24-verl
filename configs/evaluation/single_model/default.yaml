@@ -30,8 +30,17 @@ data:
   files:
     val: val.parquet
     test: test.parquet
-  # val, test, or both
-  split: both
+    tot_hard100: tot_hard100.parquet
+    unsolvable: unsolvable.parquet
+  # val, test, tot_hard100, unsolvable, both, final, or all.
+  # both = val + test; final = test + tot_hard100 + unsolvable; all = all four.
+  split: all
+  # Optional explicit list. If set, this overrides split.
+  # splits:
+  #   - val
+  #   - test
+  #   - tot_hard100
+  #   - unsolvable
 
 evaluation:
   batch_size: 32
