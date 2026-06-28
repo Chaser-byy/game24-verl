@@ -1,0 +1,57 @@
+# Strict single-model evaluation for a full-parameter verl checkpoint.
+project:
+  root_dir: null
+  outputs_root: /root/autodl-tmp/outputs
+  verl_root: /root/autodl-tmp/verl
+
+model:
+  # latest_run: choose the newest full-parameter training run with a recoverable checkpoint.
+  # run_name: use one named run under outputs_root, or an absolute run directory.
+  # checkpoint: use one explicit global_step directory.
+  # direct_hf: use an already merged/exported Hugging Face model directory.
+  source: latest_run
+  run_name: null
+  checkpoint_path: null
+  hf_model_path: null
+  step: null
+  latest_run_patterns:
+    - "game24-grpo-full-param-continue-*"
+    - "game24-grpo-full-param-*"
+  checkpoint:
+    format: auto
+    load_strategy: auto
+    auto_merge: true
+    merged_dir_name: huggingface_merged
+    cache_merged_model: true
+    cleanup_merged_after_evaluation: false
+
+data:
+  data_dir: /root/autodl-tmp/game24-verl/data/game24
+  files:
+    val: val.parquet
+    test: test.parquet
+  # val, test, or both
+  split: both
+
+evaluation:
+  batch_size: 32
+  max_prompt_length: 192
+  max_new_tokens: 192
+  do_sample: false
+  num_return_sequences: 1
+  dtype: bfloat16
+  attention_implementation: sdpa
+  device: cuda
+  seed: 2026
+  tokenizer:
+    padding_side: left
+    fix_mistral_regex: true
+    add_generation_prompt: true
+
+output:
+  root_dir: /root/autodl-tmp/outputs/single-model-evaluation
+  output_dir: null
+  save_predictions: true
+  save_prompt_audit: true
+  save_resolved_config: true
+  overwrite: false

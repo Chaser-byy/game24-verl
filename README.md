@@ -45,11 +45,14 @@ scripts/
   run_grpo_lora_improved.sh  Improved strict-reward LoRA GRPO launch script
   run_grpo_full_param.sh  Full-parameter GRPO launch script starting from exported SFT model
   run_grpo_full.sh    Compatibility wrapper for run_grpo_full_param.sh
+  evaluate_single_model.py  Strict val/test evaluation for one full-parameter checkpoint
+  run_single_model_evaluation.sh  Shell entry for single-model strict evaluation
   evaluate.py         Server-side vLLM evaluation entry
   final_evaluation.py Strict raw/SFT/GRPO final evaluation and checkpoint selection
   run_final_evaluation.sh  Shell entry for final evaluation
 configs/
   default.env.example
+  evaluation/single_model/default.yaml
 ```
 
 ## Task Definition
@@ -413,6 +416,90 @@ Start the formal 400-step full-parameter run:
 FULL_GRPO_LOG_FILE=/root/autodl-tmp/logs/game24-grpo-full-param-$(date +%Y%m%d_%H%M%S).log \
 bash scripts/run_grpo_full_param.sh
 ```
+
+## Single-Model Strict Evaluation
+
+Use this entry when you want to evaluate one full-parameter GRPO checkpoint directly from a training run directory. It does not require a manually exported Hugging Face model, does not use `SFT_MODEL_PATH` or `GRPO_RUN_DIR`, does not load LoRA adapters, and does not run multi-checkpoint selection.
+
+Default config:
+
+```text
+configs/evaluation/single_model/default.yaml
+```
+
+Measure the latest full-parameter run:
+
+```bash
+bash scripts/run_single_model_evaluation.sh
+```
+
+By default, the evaluator searches `/root/autodl-tmp/outputs` for the newest recoverable run matching:
+
+```text
+game24-grpo-full-param-continue-*
+game24-grpo-full-param-*
+```
+
+It skips evaluation/SFT/LoRA metadata directories, selects the highest numeric `global_step_*` with a recoverable actor checkpoint, then runs greedy strict Pass@1 on `val.parquet` and `test.parquet`.
+
+Checkpoint handling is automatic:
+
+```text
+actor/huggingface_merged with config + weights -> load directly
+actor/huggingface with config + weights -> load directly
+raw verl FSDP actor shards -> run python -m verl.model_merger merge automatically
+actor/huggingface with only tokenizer/config -> not treated as a complete model
+```
+
+For raw FSDP checkpoints, the merge source is `global_step_N/actor` and the cached target is:
+
+```text
+global_step_N/actor/huggingface_merged
+```
+
+The evaluator uses the official verl v0.7.1 merger command:
+
+```text
+python -m verl.model_merger merge --backend fsdp --local_dir <actor> --target_dir <actor>/huggingface_merged
+```
+
+There is no separate direct-FSDP Transformers inference path in this evaluator. The stable path is automatic merge to Hugging Face format, then one model load for val and test. The merged model is cached by default and reused on later runs; original checkpoints, SFT models, and other experiments are not deleted.
+
+Dry-run shows the resolved run/checkpoint/format without loading a GPU model or merging:
+
+```bash
+bash scripts/run_single_model_evaluation.sh --dry-run
+```
+
+Evaluate a specific training directory by copying the config:
+
+```bash
+cp configs/evaluation/single_model/default.yaml configs/evaluation/single_model/full_param_step500.yaml
+```
+
+Then edit:
+
+```yaml
+model:
+  source: run_name
+  run_name: game24-grpo-full-param-continue-400-to-500-具体时间
+  step: 500
+```
+
+Run it:
+
+```bash
+bash scripts/run_single_model_evaluation.sh \
+  --config configs/evaluation/single_model/full_param_step500.yaml
+```
+
+Outputs are written under:
+
+```text
+/root/autodl-tmp/outputs/single-model-evaluation/<run-name>/step_<N>/<timestamp>/
+```
+
+The directory contains `results.json`, split summaries, full prediction JSONL files, `prompt_audit.json`, `resolved_config.yaml`, and `evaluation.log`. Strict exact accuracy is computed only from `verification.is_correct` in `game24/verifier.py`; `reward_mean` is reported separately and is not accuracy.
 
 ## Final Evaluation
 
